@@ -51,30 +51,4 @@ if __name__ == "__main__":
         .option("subscribe", "invoices") \
         .option("startingOffsets", "earliest") \
         .load()
-
-    value_df = kafka_df.withColumn("value", from_json(col("value").cast("string"), schema))
-
-    explode_df = value_df.selectExpr("value.InvoiceNumber", "value.CreatedTime", "value.StoreID",
-                                     "value.PosID", "value.CustomerType", "value.PaymentMethod", "value.DeliveryType",
-                                     "value.DeliveryAddress.City", "value.DeliveryAddress.State",
-                                     "value.DeliveryAddress.PinCode", "explode(value.InvoiceLineItems) as LineItem")
-
-    flattened_df = explode_df.selectExpr("LineItem.ItemCode as ItemCode",
-                                         "LineItem.ItemDescription as ItemDescription",
-                                         "LineItem.ItemPrice as ItemPrice",
-                                         "LineItem.ItemQty as ItemQty",
-                                         "LineItem.TotalValue as TotalValue"
-                                         ).drop("LineItem")
-    kafka_target_df = flattened_df.select(expr("InvoiceNumber as key"),
-                                          to_avro(struct("*")).alias("value"))
-
-    invoice_writer_query = kafka_target_df.writeStream \
-        .format("kafka") \
-        .option("checkpointLocation", "chk-point-dir") \
-        .option("kafka.bootstrap.servers", "localhost:9092") \
-        .option("topic", "invoice-items") \
-        .outputMode("append") \
-        .start()
-
-    logger.info("Start Writer query")
-    invoice_writer_query.awaitTermination()
+    
