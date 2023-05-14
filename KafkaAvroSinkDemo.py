@@ -1,5 +1,6 @@
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, expr
+from pyspark.sql.avro.functions import to_avro
+from pyspark.sql.functions import from_json, col, expr, struct
 from pyspark.sql.types import StructType, StructField, StringType, LongType, DoubleType, IntegerType, ArrayType
 
 from lib.logger import Log4j
@@ -7,7 +8,7 @@ from lib.logger import Log4j
 if __name__ == "__main__":
     spark = SparkSession \
         .builder \
-        .appName("Multi Query Demo") \
+        .appName("Kafka Avro Sink Demo") \
         .master("local[*]") \
         .config("spark.streaming.stopGracefullyOnShutdown", "true") \
         .getOrCreate()
@@ -52,18 +53,6 @@ if __name__ == "__main__":
         .load()
 
     value_df = kafka_df.withColumn("value", from_json(col("value").cast("string"), schema))
-    notification_df = value_df.select("value.InvoiceNumber", "value.CustomerCardNo", "value.TotalAmount") \
-        .withColumn("EarnedLoyalityPoints", expr("TotalAmount*0.2"))
-    kafka_target_df = notification_df.selectExpr("InvoiceNumber as key",
-                                                 "to_json(struct(CustomerCardNo,TotalAmount,EarnedLoyalityPoints )) as value")
-    notification_writer_query = kafka_target_df.writeStream \
-        .queryName("Notification Writer") \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", "localhost:9092") \
-        .option("topic", "notifications") \
-        .option("checkpointLocation", "chk-point-dir/notify") \
-        .outputMode("append") \
-        .start()
 
     explode_df = value_df.selectExpr("value.InvoiceNumber", "value.CreatedTime", "value.StoreID",
                                      "value.PosID", "value.CustomerType", "value.PaymentMethod", "value.DeliveryType",
@@ -76,14 +65,16 @@ if __name__ == "__main__":
                                          "LineItem.ItemQty as ItemQty",
                                          "LineItem.TotalValue as TotalValue"
                                          ).drop("LineItem")
+    kafka_target_df = flattened_df.select(expr("InvoiceNumber as key"),
+                                          to_avro(struct("*")).alias("value"))
 
-    invoice_writer_query = flattened_df.writeStream \
-        .format("json") \
-        .queryName("Flattened Invoice Writer") \
-        .option("checkpointLocation", "chk-point-dir/flatten") \
-        .option("path", "output") \
+    invoice_writer_query = kafka_target_df.writeStream \
+        .format("kafka") \
+        .option("checkpointLocation", "chk-point-dir") \
+        .option("kafka.bootstrap.servers", "localhost:9092") \
+        .option("topic", "invoice-items") \
         .outputMode("append") \
         .start()
 
-    logger.info("Waiting for queries..")
-    spark.streams.awaitAnyTermination()
+    logger.info("Start Writer query")
+    invoice_writer_query.awaitTermination()
