@@ -1,13 +1,15 @@
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as f
+from pyspark.sql.functions import from_json, col, expr
+from pyspark.sql.types import StructType, StructField, StringType, LongType, DoubleType, IntegerType, ArrayType
+
 from lib.logger import Log4j
-from pyspark.sql.types import *
 
 if __name__ == "__main__":
-    spark = SparkSession.builder \
+    spark = SparkSession \
+        .builder \
+        .appName("Multi Query Demo") \
         .master("local[*]") \
-        .appName("Spark Sink Demo") \
-        .config("spark.streaming.stopGracefullyOnShutdown", True) \
+        .config("spark.streaming.stopGracefullyOnShutdown", "true") \
         .getOrCreate()
 
     logger = Log4j(spark)
@@ -49,31 +51,39 @@ if __name__ == "__main__":
         .option("startingOffsets", "earliest") \
         .load()
 
-    value_df = kafka_df.select(f.from_json(f.col("value").cast("string"), schema).alias("value"))
+    value_df = kafka_df.withColumn("value", from_json(col("value").cast("string"), schema))
     notification_df = value_df.select("value.InvoiceNumber", "value.CustomerCardNo", "value.TotalAmount") \
-        .withColumn("EarnedLoyaltyPoints", f.expr("TotalAmount*0.2"))
-    #
-    # notification_df.withColumn("value",
-    #                            f.to_json(f.struct("CustomerCardNo", "TotalAmount", "EarnedLoyaltyPoints"))).show(
-    #     truncate=False)
-    # kafka_target_df = notification_df.selectExpr("InvoiceNumber as key",
-    #                                              """to_json(
-    #
-    # """)
-    kafka_target_df = notification_df.withColumnRenamed("InvoiceNumber", "key") \
-        .withColumn("value",
-                    f.to_json(f.struct("CustomerCardNo", "TotalAmount", "EarnedLoyaltyPoints"))) \
-        .select("key", "value");
-
-    notification_writer_query = kafka_target_df \
-        .writeStream \
+        .withColumn("EarnedLoyalityPoints", expr("TotalAmount*0.2"))
+    kafka_target_df = notification_df.selectExpr("InvoiceNumber as key",
+                                                 "to_json(struct(CustomerCardNo,TotalAmount,EarnedLoyalityPoints )) as value")
+    notification_writer_query = kafka_target_df.writeStream \
         .queryName("Notification Writer") \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "localhost:9092") \
         .option("topic", "notifications") \
-        .option("checkpointLocation", "chk-point-dir") \
+        .option("checkpointLocation", "chk-point-dir/notify") \
         .outputMode("append") \
         .start()
 
-    logger.info("Listening and writing to kafka")
-    notification_writer_query.awaitTermination();
+    explode_df = value_df.selectExpr("value.InvoiceNumber", "value.CreatedTime", "value.StoreID",
+                                     "value.PosID", "value.CustomerType", "value.PaymentMethod", "value.DeliveryType",
+                                     "value.DeliveryAddress.City", "value.DeliveryAddress.State",
+                                     "value.DeliveryAddress.PinCode", "explode(value.InvoiceLineItems) as LineItem")
+
+    flattened_df = explode_df.selectExpr("LineItem.ItemCode as ItemCode",
+                                         "LineItem.ItemDescription as ItemDescription",
+                                         "LineItem.ItemPrice as ItemPrice",
+                                         "LineItem.ItemQty as ItemQty",
+                                         "LineItem.TotalValue as TotalValue"
+                                         ).drop("LineItem")
+
+    invoice_writer_query = flattened_df.writeStream \
+        .format("json") \
+        .queryName("Flattened Invoice Writer") \
+        .option("checkpointLocation", "chk-point-dir/flatten") \
+        .option("path", "output") \
+        .outputMode("append") \
+        .start()
+
+    logger.info("Waiting for queries..")
+    spark.streams.awaitAnyTermination()
