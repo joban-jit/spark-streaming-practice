@@ -16,13 +16,13 @@ if __name__ == "__main__":
     logger = Log4j(spark)
 
     impressionSchema = StructType([
-        StructField("InventoryID", StringType()),
+        StructField("ImpressionID", StringType()),
         StructField("CreatedTime", StringType()),
         StructField("Campaigner", StringType())
     ])
 
     clickSchema = StructType([
-        StructField("InventoryID", StringType()),
+        StructField("ImpressionID", StringType()),
         StructField("CreatedTime", StringType())
     ])
 
@@ -36,10 +36,10 @@ if __name__ == "__main__":
 
     impressions_df = kafka_impression_df \
         .select(from_json(col("value").cast("string"), impressionSchema).alias("value")) \
-        .select(expr("value.InventoryID as ImpressionID"), "value.CreatedTime", "value.Campaigner") \
+        .select(expr("value.ImpressionID"), "value.CreatedTime", "value.Campaigner") \
         .withColumn("ImpressionTime", to_timestamp(col("CreatedTime"), "yyyy-MM-dd HH:mm:ss")) \
-        .drop("CreatedTime")
-    impressions_df.printSchema()
+        .drop("CreatedTime") \
+        .withWatermark("ImpressionTime", "30 minute")
 
     kafka_click_df = spark \
         .readStream \
@@ -51,9 +51,11 @@ if __name__ == "__main__":
 
     clicks_df = kafka_click_df \
         .select(from_json(col("value").cast("string"), clickSchema).alias("value")) \
-        .select(expr("value.InventoryID as ClickID"), "value.CreatedTime") \
+        .select(expr("value.ImpressionID as ClickID"), "value.CreatedTime") \
         .withColumn("ClickTime", to_timestamp(col("CreatedTime"), "yyyy-MM-dd HH:mm:ss")) \
-        .drop("CreatedTime")
+        .drop("CreatedTime") \
+        .withWatermark("ClickTime", "30 minute")
+
     clicks_df.printSchema()
 
     joinExpr = "ImpressionID==ClickID"
