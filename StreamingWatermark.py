@@ -58,8 +58,9 @@ if __name__ == "__main__":
 
     clicks_df.printSchema()
 
-    joinExpr = "ImpressionID==ClickID"
-    join_type = "inner"
+    joinExpr = "ImpressionID==ClickID" + \
+               " AND ClickTime BETWEEN ImpressionTime AND ImpressionTime + interval 15 minute"
+    join_type = "leftOuter"
 
     joined_df = impressions_df.join(clicks_df, expr(joinExpr), join_type)
 
