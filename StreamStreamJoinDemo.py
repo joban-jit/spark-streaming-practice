@@ -7,7 +7,7 @@ from lib.logger import Log4j
 if __name__ == "__main__":
     spark = SparkSession \
         .builder \
-        .appName("Sliding Window Demo") \
+        .appName("Stream Stream Join Demo") \
         .master("local[*]") \
         .config("spark.sql.streaming.stopGracefullyOnShutdown", "true") \
         .config("spark.sql.shuffle.partitions", 2) \
@@ -15,38 +15,57 @@ if __name__ == "__main__":
 
     logger = Log4j(spark)
 
-    schema = StructType([
+    impressionSchema = StructType([
+        StructField("InventoryID", StringType()),
         StructField("CreatedTime", StringType()),
-        StructField("Reading", DoubleType())
+        StructField("Campaigner", StringType())
     ])
 
-    kafka_source_df = spark.readStream \
+    clickSchema = StructType([
+        StructField("InventoryID", StringType()),
+        StructField("CreatedTime", StringType())
+    ])
+
+    kafka_impression_df = spark \
+        .readStream \
         .format("kafka") \
         .option("kafka.bootstrap.servers", "localhost:9092") \
-        .option("subscribe", "sensor") \
+        .option("subscribe", "impressions") \
         .option("startingOffsets", "earliest") \
         .load()
 
-    value_df = kafka_source_df.select(col("key").cast("string").alias("SensorID"),
-                                      from_json(col("value").cast("string"), schema).alias("value"))
+    impressions_df = kafka_impression_df \
+        .select(from_json(col("value").cast("string"), impressionSchema).alias("value")) \
+        .select(expr("value.InventoryID as ImpressionID"), "value.CreatedTime", "value.Campaigner") \
+        .withColumn("ImpressionTime", to_timestamp(col("CreatedTime"), "yyyy-MM-dd HH:mm:ss")) \
+        .drop("CreatedTime")
+    impressions_df.printSchema()
 
-    sensor_df = value_df.select("SensorID", "value.*") \
-        .withColumn("CreatedTime", to_timestamp(col("CreatedTime"), "yyyy-MM-dd HH:mm:ss"))
+    kafka_click_df = spark \
+        .readStream \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", "localhost:9092") \
+        .option("subscribe", "clicks") \
+        .option("startingOffsets", "earliest") \
+        .load()
 
-    window_agg_df = sensor_df \
-        .withWatermark("CreatedTime", "30 minute") \
-        .groupBy(col("SensorID"),
-                 window(col("CreatedTime"), "15 minute", "5 minute")) \
-        .agg(max("Reading").alias("MaxReading"))
+    clicks_df = kafka_click_df \
+        .select(from_json(col("value").cast("string"), clickSchema).alias("value")) \
+        .select(expr("value.InventoryID as ClickID"), "value.CreatedTime") \
+        .withColumn("ClickTime", to_timestamp(col("CreatedTime"), "yyyy-MM-dd HH:mm:ss")) \
+        .drop("CreatedTime")
+    clicks_df.printSchema()
 
-    output_df = window_agg_df.select("SensorID", "window.start", "window.end", "MaxReading")
+    joinExpr = "ImpressionID==ClickID"
+    join_type = "inner"
 
-    window_query = output_df.writeStream \
+    joined_df = impressions_df.join(clicks_df, expr(joinExpr), join_type)
+
+    output_df = joined_df.writeStream \
         .format("console") \
-        .outputMode("update") \
+        .outputMode("append") \
         .option("checkpointLocation", "chk-point-dir") \
         .trigger(processingTime="1 minute") \
         .start()
-
     logger.info("Waiting for Query")
-    window_query.awaitTermination()
+    output_df.awaitTermination()
